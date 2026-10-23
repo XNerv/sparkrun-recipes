@@ -30,6 +30,7 @@ defaults:
   host: 0.0.0.0
   served_model_name: qwen3.8-flash-next
   load_format: safetensors
+  tensor_parallel: 1
   max_model_len: 262144
   max_num_seqs: 8
   max_num_batched_tokens: 8192

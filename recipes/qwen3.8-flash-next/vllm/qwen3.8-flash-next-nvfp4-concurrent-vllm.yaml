@@ -1,0 +1,12 @@
+recipe_version: "2"
+min_sparkrun_version: "0.4.1"
+include: qwen3.8-flash-next-nvfp4-vllm
+
+metadata:
+  description: Qwen3.8-Flash-Next (~176B) NVFP4 on one DGX Spark, tuned for several concurrent clients
+
+defaults:
+  max_num_seqs: 16
+  # The GDN recurrent state pool defaults to float32; bfloat16 halves it, which frees the
+  # headroom needed to raise max_num_seqs.
+  mamba_ssm_cache_dtype: bfloat16

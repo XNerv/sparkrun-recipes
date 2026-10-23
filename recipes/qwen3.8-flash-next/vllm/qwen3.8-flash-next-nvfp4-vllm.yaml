@@ -1,0 +1,72 @@
+recipe_version: "2"
+min_sparkrun_version: "0.4.1"
+model: nvidia/Qwen3.8-Flash-Next-NVFP4
+model_revision: fc694b54fb0174e0913e6adf86691ef85a4ead47
+runtime: vllm
+# Immutable reference to ghcr.io/xnerv/qwen3.8-flash-next-gb10-vllm:sha-3415ef7 (linux/arm64).
+# To move to a newer build, read docs/IMAGE-CONTRACT.md first, then bump this line.
+container: ghcr.io/xnerv/qwen3.8-flash-next-gb10-vllm@sha256:5e715243f91577a152519c9aec8946a730ab5509afc33f8db7d808701921e6b5
+
+# The PLE n-gram table is memory-mapped from the local NVMe of the serving host,
+# so this model cannot be spread over several Sparks.
+min_nodes: 1
+max_nodes: 1
+
+# The image ENTRYPOINT is ["vllm", "serve"], which would consume sparkrun's
+# `bash -c` launcher as its own arguments. Clear it so sparkrun's command runs.
+executor_config:
+  entrypoint: ""
+
+metadata:
+  description: Qwen3.8-Flash-Next (~176B) NVFP4 on one DGX Spark, 262k context, MTP, deterministic
+  maintainer: XNerv
+  # GB. The 48 GiB PLE table is served from NVMe, not held in the 128 GB unified pool,
+  # so a stock 176B estimate would refuse a solo launch.
+  model_vram: 75
+  kv_dtype: bf16
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  served_model_name: qwen3.8-flash-next
+  load_format: safetensors
+  max_model_len: 262144
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  # 0.80 is the upstream recommendation for a long-running service: 0.85 drifted into
+  # swap after a day and 0.875 was OOM-killed on a 300k prefill.
+  gpu_memory_utilization: 0.80
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enable_prompt_tokens_details: true
+  enable_flashinfer_autotune: false
+  # auto resolves to bf16 here. fp8 KV is refused by the sparse-attention (QSA) layers.
+  kv_cache_dtype: auto
+  enable_auto_tool_choice: true
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  speculative_config: '{"method":"mtp","num_speculative_tokens":2}'
+  # The PLE gather is a CPU op plus a pageable host-to-device copy, so it must stay
+  # outside CUDA graphs: capture is PIECEWISE and ple_mmap_lookup_ids is a splitting op.
+  # The list is the v0.32 default attention ops plus the PLE gather (see docs/IMAGE-CONTRACT.md).
+  compilation_config: '{"cudagraph_mode":"PIECEWISE","splitting_ops":["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::gdn_attention_core_xpu","vllm::olmo_hybrid_gdn_full_forward","vllm::sparse_attn_indexer","vllm::rocm_aiter_sparse_attn_indexer","vllm::deepseek_v4_attention","vllm::hpc_rope_norm_forward","vllm::unified_kv_cache_update","vllm::unified_mla_kv_cache_update","vllm::ple_mmap_lookup_ids"]}'
+
+env:
+  VLLM_PLE_MMAP: "1"
+  # The mmap needs a local directory, but sparkrun serves the checkpoint by Hugging Face id,
+  # which is not one. Point it at the prepared snapshot that vLLM loads from.
+  VLLM_PLE_MMAP_DIR: "{launch.model_path}"
+  VLLM_PLE_MMAP_WORKERS: "32"
+  VLLM_PLE_MMAP_PREWARM: "0"
+  VLLM_PLE_MMAP_MADVISE: random
+  VLLM_PLE_MMAP_FAST_ROWS: "0"
+  # Deterministic top-k: the fast kernel shipped in the image (identical output at temperature 0).
+  VLLM_QSA_EXACT_TOPK: "0"
+  VLLM_QSA_DET_TOPK: "1"
+  VLLM_QSA_DET_LIB: /opt/llm/kernel-det/_C_det.so
+  # The MTP drafter scores only the 65,536 most frequent tokens.
+  VLLM_MTP_DRAFT_VOCAB: /opt/llm/draft_vocab_65536.npy
+  VLLM_USE_FLASHINFER_SAMPLER: "1"
+  # The upstream v0.32 profile was validated with no allocator override. sparkrun's GB10 default
+  # (expandable_segments:True) was only a v0.31 workaround there, so blank it to match.
+  PYTORCH_CUDA_ALLOC_CONF: ""

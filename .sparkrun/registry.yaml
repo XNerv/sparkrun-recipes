@@ -1,0 +1,4 @@
+registries:
+  - name: xnerv
+    description: Qwen3.8-Flash-Next on a single DGX Spark (GB10), patched vLLM image with the PLE table served from NVMe
+    recipes: recipes

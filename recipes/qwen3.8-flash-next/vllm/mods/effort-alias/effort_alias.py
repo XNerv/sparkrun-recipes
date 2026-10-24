@@ -63,6 +63,11 @@ from pathlib import Path
 MODEL_PATH_ENV = "VLLM_PLE_MMAP_DIR"
 OUT = Path("/tmp/chat_template.jinja")
 
+# The mod runs as root; vLLM runs as an unprivileged user. mkstemp creates
+# files with 0o600, which root can read but the vLLM user cannot, so the
+# final file must be made world-readable before the atomic rename.
+OUT_MODE = 0o644
+
 OLD = "{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
 NEW = (
     "{%- set _effort = reasoning_effort if reasoning_effort is string "
@@ -89,8 +94,21 @@ def write_out(text: str) -> bool:
     tmp = None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".chat_template.", dir=OUT.parent)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        try:
+            # Apply the final mode to the temp file before the rename, so the
+            # world-readable bit is already in place when OUT appears.
+            os.fchmod(fd, OUT_MODE)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        except BaseException:
+            # fdopen(fd) transfers ownership of fd only on success; if the
+            # block raised before fdopen, close the descriptor ourselves to
+            # avoid a leak.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
         os.replace(tmp, OUT)
         return True
     except OSError as e:

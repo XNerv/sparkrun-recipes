@@ -205,14 +205,14 @@ defaults:
   # image before concluding that it is faster for a particular workload.
   max_num_batched_tokens: 8192
 
-  # Set to 0.80 for this recipe profile. Higher values were reported to cause
+  # Set to 0.82 for this recipe profile. Higher values were reported to cause
   # memory pressure in the maintainer's tests: 0.85 reached swap after extended
   # operation, while 0.875 was OOM-killed during a 300k-token prefill. These
   # are observations, not universal thresholds; results depend on image/build,
   # request shape, concurrency, page cache and other processes. Re-test before
   # increasing this value on a different revision or workload. General guidance:
   # https://docs.vllm.ai/en/latest/configuration/
-  gpu_memory_utilization: 0.80
+  gpu_memory_utilization: 0.82
 
   # Enable **APC** (Automatic Prefix Caching — the **KV cache** of previous
   # requests is kept and reused when a new request shares the same prefix, so
@@ -516,12 +516,12 @@ env:
   # This recipe blanks the variable, which removes it from the environment and
   # makes PyTorch use its default allocator. That is deliberate: the upstream
   # v0.32 profile for this model was validated with no allocator override, and
-  # at gpu_memory_utilization 0.80 there is enough headroom that the
+  # at gpu_memory_utilization 0.82 there is enough headroom that the
   # anti-fragmentation margin is not needed. Note the trade-off: on GB10,
   # removing the flag has been observed to cause OOM at higher utilization
   # levels that served fine with it on (see
   # https://github.com/vllm-project/vllm/issues/48242). If you raise
-  # gpu_memory_utilization above 0.80, consider restoring
+  # gpu_memory_utilization above 0.82, consider restoring
   # `expandable_segments:True` instead of leaving this blank.
   #
   # Also note: `expandable_segments:True` is incompatible with **KV

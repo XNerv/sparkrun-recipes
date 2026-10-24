@@ -1,73 +1,500 @@
+# =============================================================================
+# sparkrun recipe — Qwen3.8-Flash-Next
+#
+# 262144-token native context (no YaRN extension)
+# NVFP4 experts + FP8 PLE — native-context profile on DGX Spark (GB10)
+# 
+# Purpose: Orchestrate the deployment of the Qwen3.8-Flash-Next model using
+#          the **vLLM** (high-performance inference engine for language models)
+#          runtime and the prebuilt container image from the
+#          https://github.com/XNerv/qwen3.8-Flash-DGX fork (upstream:
+#          https://github.com/blazux/qwen3.8-Flash-DGX).
+#
+#          This base recipe uses the model's native context length of
+#          262144 tokens, without YaRN context extension.
+# =============================================================================
+
+# Sparkrun recipe format and minimum version.
 recipe_version: "2"
 min_sparkrun_version: "0.4.1"
+
+# **HuggingFace** (platform for sharing models, datasets, and machine learning
+# applications) identifier of the model to be served.
+# Model card: https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4
 model: nvidia/Qwen3.8-Flash-Next-NVFP4
+
+# Pin the Hugging Face model revision for reproducible downloads.
 model_revision: fc694b54fb0174e0913e6adf86691ef85a4ead47
+
+# Inference engine to be used. This runtime generates the `vllm serve` command
+# from defaults; see the vLLM flag table for the full key-to-flag mapping.
 runtime: vllm
-# Immutable reference to ghcr.io/xnerv/qwen3.8-flash-next-gb10-vllm:sha-3415ef7 (linux/arm64).
-# To move to a newer build, read docs/IMAGE-CONTRACT.md first, then bump this line.
+
+# Pin the immutable OCI image digest and target platform.
+# See docs/IMAGE-CONTRACT.md before updating the image reference.
+# Source: https://github.com/XNerv/qwen3.8-Flash-DGX
 container: ghcr.io/xnerv/qwen3.8-flash-next-gb10-vllm@sha256:5e715243f91577a152519c9aec8946a730ab5509afc33f8db7d808701921e6b5
 
-# The PLE n-gram table is memory-mapped from the local NVMe of the serving host,
-# so this model cannot be spread over several Sparks.
+# The **PLE** (Prompt Lookup Embedding — Qwen's ~48 GiB n-gram lookup table for
+# character-level grounding) table is **mmap**-served (memory-mapped: paged in
+# from disk on demand rather than held in RAM) from the local **NVMe**
+# (Non-Volatile Memory Express — high-speed storage protocol) of the serving
+# host, so this model cannot be spread over several Sparks.
 min_nodes: 1
 max_nodes: 1
 
-# The image ENTRYPOINT is ["vllm", "serve"], which would consume sparkrun's
-# `bash -c` launcher as its own arguments. Clear it so sparkrun's command runs.
+# **Mods** (modifications: extensions that run additional logic during the
+# recipe lifecycle) are a top-level list. Each entry resolves to a directory
+# containing a mandatory run.sh; the resolver looks first at mods/<name>,
+# adjacent to this recipe. During "Phase 1" (sparkrun's pre-launch phase,
+# before the serving container starts), sparkrun expands the mod into a
+# **pre_exec** command (pre-execution hook that runs inside the container
+# before the main entrypoint). pre_exec is sequential and "fail-fast" (a
+# non-zero exit aborts the launch), so a mod failure stops the launch before
+# vLLM starts.
+mods:
+#   This mod maps OpenAI reasoning_effort values
+#   (none/minimal/low/medium/high/xhigh/max) to Qwen3.8's three native levels
+#   (low/medium/xhigh) and writes the patched template to
+#   /tmp/chat_template.jinja.
+  - effort-alias
+
+# Per-**executor** (component that actually runs the container) configuration
+# lives under executor_config (top-level). Docker maps entrypoint to
+# `--entrypoint`: `null` leaves the image ENTRYPOINT untouched, while `""`
+# clears it. The image ships ["vllm", "serve"], which would swallow sparkrun's
+# `bash -c` launcher; clearing it lets the generated `vllm serve` command run
+# as intended.
 executor_config:
   entrypoint: ""
 
 metadata:
-  description: Qwen3.8-Flash-Next (~176B) NVFP4 on one DGX Spark, 262k context, MTP, deterministic
+  description: >-
+    Qwen3.8-Flash-Next (~176B MoE, ~6B active), mixed precision
+    (BF16 base, NVFP4 expert layers, FP8 PLE) on one DGX Spark GB10;
+    262144-token native context without YaRN extension, MTP,
+    PLE mmap from NVMe, deterministic QSA path.
+    
+  # Maintainer responsible for the recipe.
   maintainer: XNerv
-  # GB. The 48 GiB PLE table is served from NVMe, not held in the 128 GB unified pool,
-  # so a stock 176B estimate would refuse a solo launch.
-  model_vram: 75
-  kv_dtype: bf16
+
+  # Estimated resident model-weight memory in GB for sparkrun's VRAM preflight.
+  # Community single-Spark vLLM reports with the ~47.68 GiB PLE table served
+  # from NVMe put resident weights at about 75.9-76 GiB, including MTP weights.
+  # Sparkrun documents model_vram in GB, while those reports use GiB; 76 GiB is
+  # about 81.6 decimal GB. Therefore use 82 GB here (rounded), rather than 76,
+  # to keep the units consistent with sparkrun's metadata field.
+  # References:
+  #   https://github.com/tonyd2wild/Qwen3.8-Flash-Next-NVFP4-DGX-Spark
+  #   https://github.com/dolf3131/qwen3.8-flash-next-dgx-spark
+  # This is a community-derived estimate, not a measured peak for this exact
+  # image/revision. mmap does not mean zero RAM use: accessed PLE pages can
+  # occupy the OS page cache and unified memory. This field estimates resident
+  # weights, not total process memory, PLE page residency, KV cache, or runtime
+  # workspaces. Revisit it if checkpoint files or loading behavior change.
+  model_vram: 82
+
+  # Architecture hints for sparkrun's KV-cache estimator. config.json has 48
+  # language layers, of which 12 are full_attention (one every four layers);
+  # the other 36 use linear_attention. The cache-bearing attention layers use
+  # 2 KV heads and head_dim 256. Supplying attention_layers selects sparkrun's
+  # hybrid attention/recurrent estimate rather than counting all 48 layers as
+  # full attention. The estimate is still a floor: this config does not provide
+  # a validated recurrent_state_bytes value, and QSA's sparse indexer may add
+  # memory that the generic estimator does not model. Do not invent that value;
+  # compare `sparkrun recipe vram` with measured runtime memory before tuning.
+  num_layers: 48
+  attention_layers: 12
+  num_kv_heads: 2
+  head_dim: 256
+
+  # KV-cache dtype used by the same preflight estimate. Keep this aligned with
+  # defaults.kv_cache_dtype below. The recipe's QSA path requires BF16 KV; do
+  # not change to FP8 unless the exact pinned runtime/image explicitly supports it.
+  kv_dtype: bfloat16
 
 defaults:
-  port: 8000
+  # Bind address (where the API listens inside the container).
   host: 0.0.0.0
+  # Port on which the inference server listens.
+  port: 8000
+
+  # Model name exposed to clients in `/v1/models` (may differ from the
+  # HuggingFace identifier).
   served_model_name: qwen3.8-flash-next
+
+  # Weight loader. `safetensors` forces the **safetensors** (safe and efficient
+  # tensor storage format) path; it does not fall back to .pt (PyTorch binary)
+  # the way `auto` does. The NVFP4 checkpoint is published only in safetensors,
+  # so the explicit value buys two things: (1) a clear failure if the format
+  # ever changes, instead of vLLM silently trying `safe_open` on a .pt file;
+  # (2) immunity to the `auto` fallback behavior, which is irrelevant here but
+  # surprising when it triggers. Other values such as `pt`, `gguf`,
+  # `bitsandbytes`, or `tensorizer` select different loaders entirely; none
+  # apply to a stock Hugging Face NVFP4 release.
   load_format: safetensors
+
+  # **Tensor parallelism** (splitting model weights across GPUs). On DGX Spark,
+  # the GB10 **SoC** (System-on-Chip) exposes exactly one GPU per node, so
+  # **TP** (tensor parallelism) maps 1:1 to the node count: tp=1 means "one
+  # Spark, one GPU"; tp=2 means "two Sparks, two GPUs". sparkrun translates
+  # this to vLLM's `--tensor-parallel-size` flag. This recipe is locked to 1
+  # because the **PLE** table is **mmap**-served from the local NVMe of the
+  # serving host, so it cannot be split across hosts without breaking the
+  # mmap. min_nodes and max_nodes, both set to 1 above, enforce the same
+  # constraint at the scheduler level.
   tensor_parallel: 1
+
+  # Maximum sequence length (prompt plus generated tokens) that vLLM will
+  # accept. The model card reports a native context window of 262144 tokens.
+  # This setting does not guarantee that every request of that length will fit
+  # under every concurrency and memory-pressure condition. Context extension
+  # beyond the native window may require **YaRN** (a RoPE scaling technique)
+  # and separate quality validation; it is not enabled here. This setting
+  # strongly affects **KV cache** capacity requirements, but the exact memory
+  # impact depends on architecture, cache implementation, batch shape and
+  # runtime version. Model card: https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4
   max_model_len: 262144
+
+  # Recipe concurrency choice: max_num_seqs caps the number of sequences
+  # scheduled together during decoding. The GB10's 128 GB unified memory is
+  # shared by CPU processes, model weights, KV cache and other allocations.
+  # The value 8 should therefore be treated as a profile-specific setting, not
+  # a universal optimum. Revalidate it against the intended context lengths,
+  # concurrency, memory headroom and latency/throughput targets.
   max_num_seqs: 8
+
+  # Token budget for one scheduler iteration. Increasing it can improve
+  # prefill throughput and aggregate throughput, but may increase resource
+  # use and affect **ITL** (inter-token latency) and **TTFT** (time to first
+  # token). The value 8192 is a recipe tuning choice; compare it with smaller
+  # values using the same prompts, concurrency, warm-up policy and runtime
+  # image before concluding that it is faster for a particular workload.
   max_num_batched_tokens: 8192
-  # 0.80 is the upstream recommendation for a long-running service: 0.85 drifted into
-  # swap after a day and 0.875 was OOM-killed on a 300k prefill.
+
+  # Set to 0.80 for this recipe profile. Higher values were reported to cause
+  # memory pressure in the maintainer's tests: 0.85 reached swap after extended
+  # operation, while 0.875 was OOM-killed during a 300k-token prefill. These
+  # are observations, not universal thresholds; results depend on image/build,
+  # request shape, concurrency, page cache and other processes. Re-test before
+  # increasing this value on a different revision or workload. General guidance:
+  # https://docs.vllm.ai/en/latest/configuration/
   gpu_memory_utilization: 0.80
+
+  # Enable **APC** (Automatic Prefix Caching — the **KV cache** of previous
+  # requests is kept and reused when a new request shares the same prefix, so
+  # that shared prefix is not recomputed). This is what makes multi-turn
+  # conversations (a chat session where each turn resends the history) and
+  # repeated-document workloads cheap: the shared prefix is processed once,
+  # then served from cache. Recent vLLM versions enable it by default; the
+  # explicit value keeps the recipe self-documenting and immune to default
+  # changes across versions.
   enable_prefix_caching: true
+
+  # Enable **chunked prefill** (large prompts are split into chunks and batched
+  # alongside decode requests). Without it, a long **prefill** (processing the
+  # prompt) blocks every in-flight **decode** (token generation), spiking their
+  # **ITL** (Inter-Token Latency — the gap between tokens a client sees). With
+  # it, decode keeps running and the remaining `max_num_batched_tokens` is
+  # filled with prefill chunks, trading the new request's **TTFT** (Time To
+  # First Token) for smoother existing requests.
   enable_chunked_prefill: true
+
+  # Expose **prompt_tokens_details** (a sub-object of the `usage` block in
+  # OpenAI-compatible responses, carrying `cached_tokens` — how many prompt
+  # tokens were served from the **prefix cache** instead of being recomputed).
+  # Without this flag the sub-object is `null`, so clients cannot tell a cache
+  # miss from a disabled cache. Requires `enable_prefix_caching` (enabled
+  # above) to report any hits at all. Known limitation: when `cached_tokens`
+  # is 0, vLLM may omit the sub-object or return `null`, so a client must
+  # treat "absent" as "zero or unknown", not as an error.
   enable_prompt_tokens_details: true
-  enable_flashinfer_autotune: false
-  # auto resolves to bf16 here. fp8 KV is refused by the sparse-attention (QSA) layers.
-  kv_cache_dtype: auto
+
+  # Explicit **bf16** (bfloat16) instead of `auto`: the **QSA** (Qwen Sparse
+  # Attention — the model's sparse attention implementation) path hard-refuses
+  # anything but bf16, so this is currently the only supported type. `auto`
+  # would resolve to bf16 today, but it has a second resolution rule: if the
+  # checkpoint ever declares a `kv_cache_scheme`, `auto` silently switches the
+  # cache to **fp8** (8-bit float) without being asked. On this model, such a
+  # switch does not degrade performance — it aborts the boot with
+  # `NotImplementedError` from the QSA layers. This value and
+  # `metadata.kv_dtype` above must be the same.
+  kv_cache_dtype: bfloat16
+
+  # Enable **auto tool choice** (the `tool_choice="auto"` mode of the OpenAI
+  # chat API, where the client supplies a `tools` list and lets the model
+  # decide whether to call one of them or answer in plain text). Without this
+  # flag, vLLM does not accept `tool_choice="auto"` requests at all — the
+  # documentation calls it "mandatory" for automatic function calling. It is
+  # only half of the pair: the model still has to emit the call in a format
+  # vLLM can parse, which is what `tool_call_parser: qwen3_coder` below
+  # provides. Qwen3's native tool-call format is the one `qwen3_coder`
+  # understands, so the two flags are configured together.
   enable_auto_tool_choice: true
+
+  # Tool-call **parser** (the component that extracts a function call from the
+  # model's raw output and converts it into the OpenAI-compatible `tool_calls`
+  # object). Required together with `enable_auto_tool_choice` above — vLLM
+  # rejects `tool_choice="auto"` if either is missing. `qwen3_coder`
+  # understands Qwen3's native **XML tool-call format** (`<tool_call>
+  # <function=NAME> <parameter=KEY>value</parameter> </function> </tool_call>`),
+  # so it is the correct parser for this model family.
   tool_call_parser: qwen3_coder
+
+  # **Reasoning parser**: separates the model's reasoning steps from its final
+  # answer in the raw output, and exposes them in the `reasoning` field of
+  # OpenAI-compatible responses (formerly `reasoning_content`). `qwen3`
+  # recognizes the `<think>...</think>` delimiters and requires both the
+  # opening and closing tokens (stricter than other parsers). One
+  # Qwen-specific exception: Qwen3.5+ may start a `<tool_call>` inside the
+  # `<think>` block without emitting `</think>` first. In that case the parser
+  # treats `<tool_call>` as an **implicit reasoning end** — otherwise the
+  # stream would never leave reasoning mode, and the tool call (plus any text
+  # around it) would be misclassified as reasoning instead of reaching
+  # `content` and `tool_calls`.
   reasoning_parser: qwen3
+
+  # **Chat template**: the Jinja2 file that formats the conversation (roles,
+  # messages, special tokens) into the token sequence the model sees. This key
+  # overrides the template embedded in the model's tokenizer config, and the
+  # vLLM runtime maps it to `--chat-template`. The path is inside the
+  # container, not on the host: the `effort-alias` mod writes it during
+  # **pre_exec** (sparkrun's pre-launch hook, which runs before `vllm serve`),
+  # and the file must exist by the time vLLM starts — otherwise vLLM raises at
+  # boot instead of falling back to the tokenizer's template. The mod handles
+  # that contract explicitly: if it cannot produce the file, it exits non-zero,
+  # pre_exec is fail-fast, and the launch aborts before vLLM is even invoked.
+  chat_template: /tmp/chat_template.jinja
+
+  # **MTP** (Multi-Token Prediction — the model's built-in speculative decoding
+  # head, a 4B-parameter module shipped inside the checkpoint that proposes N
+  # tokens per step for the main model to verify). Because the **draft head**
+  # lives in the same checkpoint as the target weights, no separate **draft
+  # model** (a smaller model trained to propose speculative tokens) needs to be
+  # loaded or kept in sync. A value of 2 is a conservative depth: higher values
+  # (3 is common in vLLM recipes) draft further ahead but lower the acceptance
+  # rate, so 2 favors stable throughput on a single Spark.
   speculative_config: '{"method":"mtp","num_speculative_tokens":2}'
-  # The PLE gather is a CPU op plus a pageable host-to-device copy, so it must stay
-  # outside CUDA graphs: capture is PIECEWISE and ple_mmap_lookup_ids is a splitting op.
-  # The list is the v0.32 default attention ops plus the PLE gather (see docs/IMAGE-CONTRACT.md).
+
+  # Disable **FlashInfer autotune** (the runtime search for the fastest kernel
+  # parameters — tile sizes, block shapes — run during **kernel warmup** for
+  # the shapes the model will actually serve). The image already ships
+  # **pre-tuned kernels** (kernel binaries and heuristic parameters compiled
+  # and measured for this GPU), so autotune would only add startup latency: it
+  # benchmarks candidate tactics one by one, and on large models this can
+  # stretch warmup by minutes. Keeping it disabled also avoids two failure
+  # modes seen in the field: the autotuner running out of GPU memory
+  # mid-benchmark (it then silently falls back to a slower default tactic) and,
+  # on some Blackwell parts, a segfault in the SM100 autotuner. The trade-off
+  # is that a shape the pre-tuned set does not cover well may run slower than a
+  # freshly tuned kernel would — acceptable here because the serving shapes are
+  # known and already covered by the image.
+  enable_flashinfer_autotune: false
+
+  # Compilation and **CUDA graph** (pre-recorded GPU execution trace that
+  # replays a whole sequence of kernels with one launch) configuration. This
+  # block exists because of one operation: the **PLE gather**
+  # (`ple_mmap_lookup_ids`), which looks up rows in the PLE table (Qwen's n-gram
+  # embedding table, mmap-served from NVMe). The gather reads the n-gram IDs on
+  # the host (CPU) and then copies the rows to the GPU, so it cannot be
+  # recorded into a CUDA graph. Capturing it would mean capturing a host-side
+  # read, which is not possible; the boot would fail with "mmap PLE requires
+  # cudagraph_mode NONE or PIECEWISE, not FULL".
+  #
+  # cudagraph_mode = PIECEWISE: the model is split into subgraphs at the
+  # operations that cannot be captured, and everything between them is
+  # captured. This is the flexible mode: attention and the PLE gather stay
+  # **eager** (interpreted, one kernel at a time), while the rest of the model
+  # benefits from graph replay. FULL would capture everything but is
+  # incompatible with the PLE gather; NONE would capture nothing.
+  #
+  # splitting_ops = the list of **splitting ops** (operations where the graph is
+  # cut, because they must run outside CUDA graphs). The list is the v0.32
+  # default attention ops (the attention backends that only support graph
+  # capture for uniform decode batches, not for prefill or mixed batches) plus
+  # `vllm::ple_mmap_lookup_ids`, the PLE gather. See docs/IMAGE-CONTRACT.md for
+  # why this exact list is required by the pinned image.
   compilation_config: '{"cudagraph_mode":"PIECEWISE","splitting_ops":["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::gdn_attention_core_xpu","vllm::olmo_hybrid_gdn_full_forward","vllm::sparse_attn_indexer","vllm::rocm_aiter_sparse_attn_indexer","vllm::deepseek_v4_attention","vllm::hpc_rope_norm_forward","vllm::unified_kv_cache_update","vllm::unified_mla_kv_cache_update","vllm::ple_mmap_lookup_ids"]}'
 
 env:
+  # **PLE mmap** mode: serve the PLE table from a memory-mapped file on NVMe
+  # instead of keeping it resident in **unified memory**. This is an
+  # **env-only** switch (read directly from the environment, not registered in
+  # `vllm.envs`), so it does not appear in `--help` or config dumps, and it is
+  # silently ignored if the `ple_mmap` patch is not present in the image. A
+  # value of "1" enables the mode; the table is then read from disk on demand,
+  # row by row.
   VLLM_PLE_MMAP: "1"
-  # The mmap needs a local directory, but sparkrun serves the checkpoint by Hugging Face id,
-  # which is not one. Point it at the prepared snapshot that vLLM loads from.
+
+  # Directory containing the PLE table files. Must be the live snapshot path
+  # (the directory vLLM actually loads the checkpoint from), not the Hugging
+  # Face repo id — the mmap needs a real filesystem path.
+  # `{launch.model_path}` is sparkrun's placeholder for the resolved snapshot
+  # directory inside the container.
   VLLM_PLE_MMAP_DIR: "{launch.model_path}"
+
+  # Number of parallel **mmap workers** (threads reading the table from disk).
+  # Each PLE lookup that touches a page not yet in memory triggers a **page
+  # fault** (the kernel reads a 4 KiB page from NVMe and blocks that thread
+  # until the read completes). A single worker therefore serializes I/O — the
+  # SSD sits idle between one fault and the next. Multiple workers fault on
+  # different pages concurrently, keeping several reads in flight at once and
+  # filling the drive's **queue depth** (the number of outstanding I/O requests
+  # the device can handle). Up to a point, more workers mean more parallel page
+  # faults and higher read throughput; beyond that point, the NVMe bandwidth
+  # saturates and extra threads only compete for the same queue. A value of 32
+  # sits past the saturation knee for most DGX Spark drives (the gain from 16
+  # to 32 is small, and further increases are negligible), while still leaving
+  # headroom for deeper-queue drives. Community recipes use 24–32.
   VLLM_PLE_MMAP_WORKERS: "32"
+
+  # **Prewarm**: if "1", the table is read into the OS **page cache** (the
+  # kernel's in-memory cache of file pages) at boot, before serving starts. A
+  # value of "0" disables it: the table is read on demand, so prewarming would
+  # only add boot latency (the first request would pay the page-fault cost
+  # anyway, and the table is larger than the page cache can hold on a 128 GB
+  # box).
   VLLM_PLE_MMAP_PREWARM: "0"
+
+  # **madvise** policy for the mmap region. `madvise` is a hint to the kernel
+  # about how the mapping will be accessed; `random` selects `MADV_RANDOM`
+  # ("expect page references in random order"), which disables **readahead**
+  # (speculative sequential prefetching). By default the kernel tries to guess
+  # the access pattern and, on each page fault, fetches not just the requested
+  # 4 KiB page but also the following pages (up to ~128 KiB), betting the
+  # program will read sequentially. That bet is wrong here: PLE lookups are
+  # **sparse and uniform** over a 48 GiB table — each token touches a handful
+  # of rows scattered across the whole table, with no locality. Readahead would
+  # fetch pages that are never used, polluting **page cache** (the kernel's
+  # in-memory cache of file pages, which here competes with the model and KV
+  # cache for the 128 GB unified pool) and wasting NVMe bandwidth on data that
+  # is discarded. `MADV_RANDOM` tells the kernel up front not to prefetch, so
+  # only the pages actually looked up are read.
   VLLM_PLE_MMAP_MADVISE: random
+
+  # PLE table read strategy. The default gather looks up rows one at a time via
+  # `np.take` over the mmap: each row whose page is not already in **page
+  # cache** (the kernel's in-memory cache of file pages) triggers a synchronous
+  # 4 KiB read from NVMe. A positive value enables a batched path that reads
+  # several rows per call; community recipes use 512 to restore the older
+  # batched I/O. Batching reduces per-row bookkeeping, but it does not avoid
+  # the synchronous read for each uncached page — so it only pays off when the
+  # rows are already cached. A value of "0" keeps the default, which is the
+  # right choice here: the table is ~48 GiB and the 128 GB unified pool is
+  # shared with the model and the KV cache, so most rows will not be in page
+  # cache anyway. The upstream project reports +8% decode at 1 stream and
+  # +17% aggregate throughput at 4 streams versus the 512 inline path. Treat
+  # these as project-reported measurements, not guarantees for every image or
+  # drive; compare using the same benchmark, cache state and runtime build.
   VLLM_PLE_MMAP_FAST_ROWS: "0"
-  # Deterministic top-k: the fast kernel shipped in the image (identical output at temperature 0).
+
+  # **Exact top-k** overlay for the **QSA** (Qwen Sparse Attention — the
+  # model's sparse attention implementation) indexer. QSA does not attend to
+  # every token: once the context passes `indexer_budget`, it selects a
+  # **top-k** (the k highest-scoring entries) set of **KV cache** blocks for
+  # each query. The default selector (`persistent_topk`) can pick *different*
+  # top-k sets on different runs when many scores tie exactly at the cutoff,
+  # which makes the **logits** (the raw, unnormalized output scores) of
+  # **prefill** — and therefore the **greedy** (always picking the
+  # highest-probability token) output — non-deterministic. A non-zero value
+  # (3 in the reference fix) replaces the selector with `torch.topk` plus
+  # canonical sorting (lower block index wins on ties, indices emitted in
+  # ascending order), which is **bit-exact** (identical output bits on every
+  # run) deterministic at a measured ~1.35× **prefill** cost (from 2,360 to
+  # 1,760 tok/s on a GB10). Kept at "0" here for two reasons: (1) the image
+  # already provides determinism through `VLLM_QSA_DET_TOPK` below, without the
+  # prefill penalty; (2) the exact overlay is a single-file patch (one file
+  # dropped onto the image, not a native vLLM path), and it is not ported to
+  # vLLM 0.30.
   VLLM_QSA_EXACT_TOPK: "0"
+
+  # Deterministic QSA top-k kernel. A value of "1" selects the deterministic
+  # sparse-attention top-k path (the kernel from
+  # https://github.com/vllm-project/vllm/pull/55122, shipped in the image as
+  # `_C_det.so` and loaded through `VLLM_QSA_DET_LIB` below). It produces
+  # identical output at temperature 0 at no prefill cost, unlike the
+  # `VLLM_QSA_EXACT_TOPK` fallback, which is also deterministic but costs
+  # 20–40% on long prefill. This is the default in the reference recipes; the
+  # explicit value keeps the recipe self-documenting.
   VLLM_QSA_DET_TOPK: "1"
+
+  # **Shared library** (a compiled `.so` file) implementing the deterministic
+  # **QSA** (Qwen Sparse Attention) top-k kernel from
+  # https://github.com/vllm-project/vllm/pull/55122. The name breaks down as
+  # `_C` (the standard PyTorch C-extension module name, the one behind
+  # `torch.ops._C`) + `_det` ("deterministic") + `.so` (Linux shared object).
+  # The library is **baked into the image** (shipped inside the container
+  # image, not downloaded at runtime) at this exact path. This is an
+  # **env-only** knob, so it does not appear in `--help` or config dumps — and
+  # if the library is missing from the image, the variable is silently ignored
+  # with no error. Pointing it at the wrong path or using an image without the
+  # file disables the deterministic kernel without warning, so it is tied to
+  # the pinned container digest above.
   VLLM_QSA_DET_LIB: /opt/llm/kernel-det/_C_det.so
-  # The MTP drafter scores only the 65,536 most frequent tokens.
+
+  # **Draft vocab** for the MTP speculative decoder: a NumPy `.npy` array
+  # (binary, not text) listing the 65,536 token ids the drafter is allowed to
+  # score. The MTP head normally projects onto the full 248k-row `lm_head` once
+  # per draft token; restricting it to these ids cuts that projection to
+  # roughly a quarter. Outputs stay exact: the target model verifies every
+  # drafted token over the full vocabulary, so only the acceptance rate
+  # changes. The file is baked into the image.
   VLLM_MTP_DRAFT_VOCAB: /opt/llm/draft_vocab_65536.npy
+
+  # Use FlashInfer's **top-k/top-p sampler** (the CUDA kernel that applies
+  # top-k/top-p filtering to the logits and draws the next token from the
+  # resulting distribution). This runs once per generated token, so its latency
+  # accumulates across a response. FlashInfer fuses the filtering and sampling
+  # into a small set of CUDA kernels; the **PyTorch-native** path does the same
+  # in separate steps, with more kernel launches and more overhead. Upstream
+  # benchmarks put FlashInfer at roughly 0.4 to 0.6 times the **Triton**
+  # (GPU-compiled kernel) time for batch sizes of 4 or more, and it does not
+  # require a CPU-to-GPU sync. Reference:
+  # https://github.com/vllm-project/vllm/pull/40376
+  #
+  # What "0" does: it opts out of FlashInfer and forces the PyTorch-native
+  # path. That path is itself split by batch size: it uses Triton when the
+  # batch size reaches 8 or more, and plain PyTorch below that. Either way, it
+  # is slower than FlashInfer — the opt-out exists for hardware or builds where
+  # the FlashInfer sampler cannot run, not for performance. If FlashInfer is
+  # unavailable or the GPU's compute capability is unsupported, vLLM falls back
+  # to this native path on its own; setting "0" is only needed to force the
+  # fallback when FlashInfer is otherwise usable.
+  #
+  # What "1" does: it requests FlashInfer. On supported hardware this is
+  # already the default, so the explicit value documents the choice and keeps
+  # it stable if the default changes again. Reference for the variable and its
+  # default: https://docs.vllm.ai/en/latest/configuration/env_vars.html
+  #
+  # Independent of the deterministic QSA top-k kernel above: that one selects
+  # sparse-attention KV blocks, this one samples tokens.
   VLLM_USE_FLASHINFER_SAMPLER: "1"
-  # The upstream v0.32 profile was validated with no allocator override. sparkrun's GB10 default
-  # (expandable_segments:True) was only a v0.31 workaround there, so blank it to match.
+
+  # PyTorch **CUDA allocator** configuration. `expandable_segments:True` is an
+  # allocator mode intended to reduce fragmentation by allowing segments to
+  # grow. Memory savings are workload-dependent; the cited report is evidence
+  # for a particular workload, not a guaranteed 2–5 GB reduction on every GPU
+  # (see
+  # https://github.com/huggingface/trl/pull/5793). It is also the sparkrun
+  # default on GB10, where it reduces fragmentation of the shared unified
+  # memory pool (see
+  # https://github.com/unslothai/unsloth/commit/1144d972d0403fae84f646ad1c1b186efb0133b1).
+  #
+  # This recipe blanks the variable, which removes it from the environment and
+  # makes PyTorch use its default allocator. That is deliberate: the upstream
+  # v0.32 profile for this model was validated with no allocator override, and
+  # at gpu_memory_utilization 0.80 there is enough headroom that the
+  # anti-fragmentation margin is not needed. Note the trade-off: on GB10,
+  # removing the flag has been observed to cause OOM at higher utilization
+  # levels that served fine with it on (see
+  # https://github.com/vllm-project/vllm/issues/48242). If you raise
+  # gpu_memory_utilization above 0.80, consider restoring
+  # `expandable_segments:True` instead of leaving this blank.
+  #
+  # Also note: `expandable_segments:True` is incompatible with **KV
+  # connectors** (KV cache connectors) in vLLM unless
+  # `--enable-cumem-allocator` is set (see
+  # https://github.com/vllm-project/vllm/pull/40812). This recipe does not use
+  # a KV connector, so that incompatibility does not apply here.
   PYTORCH_CUDA_ALLOC_CONF: ""
+  

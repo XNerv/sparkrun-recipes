@@ -1,12 +1,31 @@
+# =============================================================================
+# sparkrun recipe — Qwen3.8-Flash-Next
+#
+# 262144-token native context (no YaRN extension)
+# NVFP4 experts + FP8 PLE — concurrent-client profile on DGX Spark (GB10)
+#
+# Purpose: Extend the base recipe to serve multiple concurrent clients.
+# =============================================================================
+
+# Sparkrun recipe format and minimum version.
 recipe_version: "2"
 min_sparkrun_version: "0.4.1"
+
+# Inherit the model, runtime, container, environment and other defaults from
+# the base recipe; this recipe declares only the intended overrides or new props.
 include: qwen3.8-flash-next-nvfp4-vllm
 
 metadata:
-  description: Qwen3.8-Flash-Next (~176B) NVFP4 on one DGX Spark, tuned for several concurrent clients
+  description: >-
+    Qwen3.8-Flash-Next (~176B MoE, ~6B active), mixed precision
+    (BF16 base, NVFP4 expert layers, FP8 PLE) on one DGX Spark GB10;
+    262144-token native context, MTP, PLE mmap from NVMe, deterministic
+    QSA path, tuned for concurrent clients.
 
 defaults:
+  # Maximum number of sequences scheduled concurrently by vLLM during decoding.
   max_num_seqs: 16
-  # The GDN recurrent state pool defaults to float32; bfloat16 halves it, which frees the
-  # headroom needed to raise max_num_seqs.
+
+  # Data type for the Mamba/SSM recurrent-state cache.
+  # bfloat16 reduces cache memory usage compared with float32.
   mamba_ssm_cache_dtype: bfloat16

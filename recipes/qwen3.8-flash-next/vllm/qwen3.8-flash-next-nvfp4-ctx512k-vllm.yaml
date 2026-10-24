@@ -1,0 +1,41 @@
+# =============================================================================
+# sparkrun recipe — Qwen3.8-Flash-Next
+#
+# 524288-token context (YaRN RoPE scaling)
+# NVFP4 experts + FP8 PLE — extended-context profile on DGX Spark (GB10)
+#
+# Purpose: Extend the base recipe with YaRN RoPE settings for a 524288-token
+#          context, including the MTP draft model's maximum context length.
+# =============================================================================
+
+# Sparkrun recipe format and minimum version.
+recipe_version: "2"
+min_sparkrun_version: "0.4.1"
+
+# Inherit the model, runtime, container, environment and other defaults from
+# the base recipe; this recipe declares only the intended overrides or new props.
+include: qwen3.8-flash-next-nvfp4-vllm
+
+metadata:
+  description: >-
+    Qwen3.8-Flash-Next (~176B MoE, ~6B active), mixed precision
+    (BF16 base, NVFP4 expert layers, FP8 PLE) on one DGX Spark GB10;
+    524288-token configured context via YaRN RoPE, MTP, PLE mmap from NVMe, 
+    deterministic QSA path, tuned for large context.
+
+defaults:
+  # Maximum context length configured for the vLLM engine.
+  max_model_len: 524288
+
+  # YaRN RoPE settings for extending the model's context beyond its native limit.
+  # Uses a 2x scaling factor, following Qwen's guidance for typical context
+  # lengths around 524288 tokens.
+  hf_overrides: '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
+
+  # Match the MTP draft model's context limit to the target model's context limit.
+  speculative_config: '{"method":"mtp","num_speculative_tokens":2,"max_model_len":524288}'
+
+env:
+  # Allows vLLM to configure a context length beyond the model's native limit of 262144 tokens.
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  

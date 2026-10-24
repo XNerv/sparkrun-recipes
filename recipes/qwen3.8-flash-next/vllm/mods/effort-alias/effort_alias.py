@@ -37,22 +37,30 @@ and this script attempts to write the original template unchanged; it exits
 0 only if that write succeeds.
 
 Contract: after a successful run (exit 0), /tmp/chat_template.jinja reflects
-the newest snapshot's template, patched or not. If the snapshot cannot be
-found, read, or the output cannot be written, the script exits non-zero so
-sparkrun's fail-fast pre_exec aborts the launch before vLLM starts.
+the resolved snapshot's template, patched or not. If the snapshot directory
+is not provided, the template cannot be read, or the output cannot be
+written, the script exits non-zero so sparkrun's fail-fast pre_exec aborts
+the launch before vLLM starts.
 
-GLOB matches the HF cache layout used by this recipe's vLLM image. Update it
-if HF_HOME points elsewhere.
+Template resolution: the recipe exports
+``VLLM_PLE_MMAP_DIR: "{launch.model_path}"``, and sparkrun resolves the
+placeholder to the exact snapshot directory inside the container. The
+template is read from ``<dir>/chat_template.jinja``. This path does not
+depend on where the HuggingFace cache is mounted, so the script works under
+any HF_HOME layout.
 """
 from __future__ import annotations
 
-import glob
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-GLOB = "/hf/hub/models--nvidia--Qwen3.8-Flash-Next-NVFP4/snapshots/*/chat_template.jinja"
+# VLLM_PLE_MMAP_DIR is the recipe's PLE table directory. In this recipe its
+# value is "{launch.model_path}", the resolved snapshot root, so it also
+# contains chat_template.jinja. Reusing it avoids a second env var that would
+# duplicate the same path.
+MODEL_PATH_ENV = "VLLM_PLE_MMAP_DIR"
 OUT = Path("/tmp/chat_template.jinja")
 
 OLD = "{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
@@ -95,16 +103,28 @@ def write_out(text: str) -> bool:
         return False
 
 
-def pick_snapshot(matches: list[str]) -> Path | None:
-    """Newest snapshot with a chat_template.jinja; None if the race lost all."""
-    def mtime(p: str) -> float:
-        try:
-            return os.path.getmtime(p)
-        except OSError:
-            return -1.0
-    if not matches:
+def resolve_template() -> Path | None:
+    """Return the source chat_template.jinja, or None with a fatal message.
+
+    The source is ``<VLLM_PLE_MMAP_DIR>/chat_template.jinja``. The variable
+    must be set by the recipe's env: block and resolved by sparkrun; a
+    missing, empty, or unresolved value is a configuration error, not a
+    runtime race, so it is reported and the launch is aborted.
+    """
+    model_path = os.environ.get(MODEL_PATH_ENV, "").strip()
+
+    if not model_path:
+        warn_fail(f"{MODEL_PATH_ENV} is not set")
         return None
-    return Path(max(matches, key=mtime))
+    if "{launch.model_path}" in model_path:
+        warn_fail(f"{MODEL_PATH_ENV} contains an unresolved placeholder: {model_path!r}")
+        return None
+
+    candidate = Path(model_path) / "chat_template.jinja"
+    if not candidate.is_file():
+        warn_fail(f"chat_template.jinja not found at {candidate}")
+        return None
+    return candidate
 
 
 def jinja_ok(text: str) -> bool:
@@ -129,9 +149,8 @@ def main() -> int:
         warn_fail(f"cannot remove stale {OUT} ({e})")
         return 1
 
-    src = pick_snapshot(glob.glob(GLOB))
+    src = resolve_template()
     if src is None:
-        warn_fail(f"chat_template.jinja not found under {GLOB}")
         return 1
 
     try:

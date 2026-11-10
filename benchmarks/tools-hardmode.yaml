@@ -1,0 +1,12 @@
+# Extended tool-calling evaluation with the optional Hard Mode scenarios.
+# Compare separately from tools-standard.yaml because the scenario set differs.
+
+category: tools
+framework: tool-eval-bench
+args:
+  temperature: 0
+  parallel: 1
+  timeout: 120
+  max_turns: 8
+  trials: 3
+  hardmode: true

@@ -55,6 +55,20 @@ jobs:
             sparkrun benchmark perf "$recipe" --profile "$profile" --dry-run --solo -H 127.0.0.1
             echo "::endgroup::"
             count=$((count + 1))
-          done < <(find benchmarks -name '*.yaml' | sort)
-          echo "Validated $count benchmark profile(s)"
+          done < <(find benchmarks -name 'perf-*.yaml' | sort)
+          echo "Validated $count performance benchmark profile(s)"
+          test "$count" -gt 0
+
+      - name: Validate every tool-call benchmark profile
+        run: |
+          set -euo pipefail
+          recipe=recipes/qwen3.8-flash-next/vllm/qwen3.8-flash-next-nvfp4-vllm.yaml
+          count=0
+          while IFS= read -r profile; do
+            echo "::group::$profile"
+            sparkrun benchmark tools "$recipe" --profile "$profile" --dry-run --solo -H 127.0.0.1
+            echo "::endgroup::"
+            count=$((count + 1))
+          done < <(find benchmarks -name 'tools-*.yaml' | sort)
+          echo "Validated $count tool-call benchmark profile(s)"
           test "$count" -gt 0

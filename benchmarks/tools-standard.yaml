@@ -1,0 +1,12 @@
+# Standard tool-calling evaluation. Uses the default scenario suite and
+# repeated trials for a more stable correctness baseline.
+
+category: tools
+framework: tool-eval-bench
+args:
+  temperature: 0
+  parallel: 1
+  timeout: 120
+  max_turns: 8
+  trials: 3
+  hardmode: false

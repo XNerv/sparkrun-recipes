@@ -1,0 +1,15 @@
+# Extended llama-benchy profile for detailed performance characterization.
+# Includes test points up to 16 concurrent requests.
+# Adjust token lengths and concurrency to fit the model and serving hardware.
+
+category: performance
+framework: llama-benchy
+timeout: 21600  # 6 hours; the 5×4×5×5 matrix is large.
+
+# --- Extended sweep ---
+pp: [128, 512, 2048, 4096, 8192]       # Very short to long prompts.
+tg: [32, 128, 256, 512]                # Short to long generations.
+depth: [0, 2048, 4096, 8192, 16384]    # Empty to 16K context.
+concurrency: [1, 2, 4, 8, 16]          # Up to 16 concurrent requests.
+runs: 3                                # Average over 3 runs per point.
+prefix_caching: true                   # Measure with prefix caching enabled.

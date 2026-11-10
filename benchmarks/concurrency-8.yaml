@@ -1,0 +1,15 @@
+# Isolate the effect of request concurrency with a fixed prompt and output size.
+# Compatible with recipes that allow up to 8 simultaneous sequences.
+
+category: performance
+framework: llama-benchy
+timeout: 3600
+
+pp: [2048]
+tg: [128]
+depth: [0]
+concurrency: [1, 2, 4, 8]
+runs: 3
+warmup_runs: 1
+latency_mode: generation
+prefix_caching: false

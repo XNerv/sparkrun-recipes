@@ -2,3 +2,4 @@ registries:
   - name: xnerv
     description: Carefully curated recipes for the NVIDIA DGX Spark (GB10) environment, with validated runtime configurations, hardware-tuned optimizations, and pinned components in every recipe to ensure reproducibility.
     recipes: recipes
+    benchmarks: benchmarks

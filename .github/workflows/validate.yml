@@ -1,11 +1,11 @@
-name: Validate recipes
+name: Validate recipes and benchmark profiles
 
 on:
   push:
     branches: [main]
-    paths: ["recipes/**", ".sparkrun/**", ".github/workflows/validate.yml"]
+    paths: ["recipes/**", "benchmarks/**", ".sparkrun/**", ".github/workflows/validate.yml"]
   pull_request:
-    paths: ["recipes/**", ".sparkrun/**", ".github/workflows/validate.yml"]
+    paths: ["recipes/**", "benchmarks/**", ".sparkrun/**", ".github/workflows/validate.yml"]
   workflow_dispatch:
 
 permissions:
@@ -43,4 +43,18 @@ jobs:
             count=$((count + 1))
           done < <(find recipes -name '*.yaml' | sort)
           echo "Validated $count recipe(s)"
+          test "$count" -gt 0
+
+      - name: Validate every benchmark profile
+        run: |
+          set -euo pipefail
+          recipe=recipes/qwen3.8-flash-next/vllm/qwen3.8-flash-next-nvfp4-vllm.yaml
+          count=0
+          while IFS= read -r profile; do
+            echo "::group::$profile"
+            sparkrun benchmark perf "$recipe" --profile "$profile" --dry-run --solo -H 127.0.0.1
+            echo "::endgroup::"
+            count=$((count + 1))
+          done < <(find benchmarks -name '*.yaml' | sort)
+          echo "Validated $count benchmark profile(s)"
           test "$count" -gt 0

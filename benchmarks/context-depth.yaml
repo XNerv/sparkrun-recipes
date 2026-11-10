@@ -1,0 +1,15 @@
+# Measure prompt processing at increasing context positions, without the
+# separate cached-context measurement enabled by prefix-cache-depth.yaml.
+
+category: performance
+framework: llama-benchy
+timeout: 5400
+
+pp: [2048]
+tg: [128]
+depth: [0, 4096, 16384, 32768, 65536]
+concurrency: [1]
+runs: 3
+warmup_runs: 1
+latency_mode: generation
+prefix_caching: false

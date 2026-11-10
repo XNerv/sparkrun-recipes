@@ -120,6 +120,33 @@ sparkrun run @xnerv/qwen3.8-flash-next-nvfp4-vllm --dry-run
 
 For a permanent variation, create a derived recipe, use `include:` to inherit the base configuration, and change only the settings you need.
 
+## Benchmarking
+
+The YAML files in [`benchmarks/`](benchmarks/) are llama-benchy profiles. Start with `quick.yaml` to check that the recipe launches and answers a request; it runs one test point and is not suitable for performance conclusions. For analysis, use the profile that isolates the question you want to answer:
+
+| Profile | When to use it | Recipe and expected insight |
+| :--- | :--- | :--- |
+| `concurrency-8.yaml` | Compare load from 1 to 8 simultaneous requests with prompt, output, and context held fixed. | Use with the base or concurrent recipe. Shows how throughput and latency change as load increases, up to the base recipe's `max_num_seqs: 8`. |
+| `concurrency-16.yaml` | Extend the same comparison to 16 simultaneous requests. | Use only with `qwen3.8-flash-next-nvfp4-concurrent-vllm`, which sets `max_num_seqs: 16`; the base recipe is capped at 8. |
+| `prefill.yaml` | Compare prompt lengths while holding generation, context depth, and concurrency fixed. | Helps reveal how prompt processing changes with input size. |
+| `generation.yaml` | Compare output lengths with a fixed prompt and one request. | Helps compare generation rate and request latency as more tokens are produced; `exact_tg` requests the specified output length. |
+| `context-depth.yaml` | Compare prompt processing at progressively deeper positions in a conversation, without the profile's separate cached-context measurement. | Shows the cost of processing at a larger context depth; higher depths can increase memory pressure and latency. |
+| `prefix-cache-depth.yaml` | Measure prompt processing after loading a shared context into the prefix cache. | With `depth > 0`, llama-benchy reports a separate cached-context measurement. `prefix_caching: true` enables this benchmark measurement; it does **not** disable or enable prefix caching in the server. |
+| `standard.yaml` | Run a broader, balanced sweep across prompt, generation, context, and concurrency. | Useful for general characterization, but more expensive and less diagnostic than changing one dimension at a time. It also enables the cached-context measurement at nonzero depths. |
+| `extended-concurrency-8.yaml`, `extended-concurrency-16.yaml` | Run a broad, long sweep for detailed characterization. | Use the 16-request profile only with the concurrent recipe. These profiles combine dimensions, include cached-context measurements, and take substantially longer. |
+
+Example: compare concurrency on the base recipe and save the results:
+
+```bash
+sparkrun benchmark perf recipes/qwen3.8-flash-next/vllm/qwen3.8-flash-next-nvfp4-vllm.yaml \
+  --profile benchmarks/concurrency-8.yaml \
+  --output results/base-concurrency-8.yaml
+```
+
+For the 16-request comparison, use the concurrent recipe and `benchmarks/concurrency-16.yaml`. To measure cached-context processing, use `benchmarks/prefix-cache-depth.yaml`; compare its cached-context results with `context-depth.yaml` at the same depths, while keeping in mind that these are different benchmark paths.
+
+For meaningful comparisons, keep the recipe and image revision, benchmark profile, host, and machine state consistent; avoid other workloads on the machine. Profiles with `runs: 3` include repeated measurements and a warm-up, but results can still vary. Compare the same test points and inspect prompt-processing rate, generation rate, time to first token, and total throughput where reported; higher aggregate throughput under concurrency can come with higher per-request latency. The [Sparkrun benchmarking guide](https://sparkrun.dev/tutorials/benchmarking/) describes the measurements and result files. These profiles have not been run on DGX Spark hardware yet, so the expected insights are hypotheses to test, not measured results.
+
 ## Known limitations
 
 - **Single-node deployment:** These recipes are configured for one GB10 host.
@@ -137,7 +164,14 @@ sparkrun recipe validate --strict recipes/<family>/<runtime>/<recipe>.yaml
 sparkrun run recipes/<family>/<runtime>/<recipe>.yaml --dry-run
 ```
 
-CI runs recipe validation on pushes and pull requests. These checks do not replace a full startup and inference test on the target hardware.
+Benchmark profiles in `benchmarks/` are reusable llama-benchy presets; adjust their token lengths and concurrency to match the recipe and available hardware. The [official Sparkrun benchmark CLI](https://sparkrun.dev/cli/benchmark/) does not document a separate benchmark-profile validator, so CI checks each profile with the supported benchmark dry run:
+
+```bash
+sparkrun benchmark perf recipes/qwen3.8-flash-next/vllm/qwen3.8-flash-next-nvfp4-vllm.yaml \
+  --profile benchmarks/quick.yaml --dry-run --solo -H 127.0.0.1
+```
+
+CI validates recipes and benchmark profiles on pushes to `main` and on pull requests. These checks do not replace a full startup and inference test on the target hardware.
 
 ## Credits
 

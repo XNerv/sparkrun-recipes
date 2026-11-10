@@ -1,0 +1,15 @@
+# Measure generation length with a fixed prompt, context, and single request.
+
+category: performance
+framework: llama-benchy
+timeout: 3600
+
+pp: [512]
+tg: [32, 128, 512]
+depth: [0]
+concurrency: [1]
+runs: 3
+warmup_runs: 1
+latency_mode: generation
+exact_tg: true
+prefix_caching: false

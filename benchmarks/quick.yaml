@@ -1,0 +1,13 @@
+# One-point llama-benchy smoke test. Use it to verify that launch and inference
+# work before running a longer profile; it is not for performance comparisons.
+
+category: performance
+framework: llama-benchy
+timeout: 1800  # 30 minutes; this sweep should finish well within.
+
+pp: [512]
+tg: [32]
+depth: [0]
+concurrency: [1]
+runs: 1
+prefix_caching: false

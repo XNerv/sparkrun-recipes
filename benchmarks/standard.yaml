@@ -1,0 +1,14 @@
+# Standard llama-benchy profile for general performance characterization.
+# Adjust token lengths and concurrency to fit the model and serving hardware.
+
+category: performance
+framework: llama-benchy
+timeout: 10800  # 3 hours; accommodates the 3×3×3×4 matrix below.
+
+# --- Balanced sweep ---
+pp: [512, 2048, 4096]        # Short, medium, long prompts.
+tg: [32, 128, 512]           # Short, medium, long generations.
+depth: [0, 4096, 16384]      # Empty, 4K, and 16K context depths.
+concurrency: [1, 2, 4, 8]    # Single up to moderate concurrency.
+runs: 3                      # Average over 3 runs per point.
+prefix_caching: true         # Measure with prefix caching enabled.

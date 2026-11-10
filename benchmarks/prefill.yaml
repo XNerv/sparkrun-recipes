@@ -1,0 +1,14 @@
+# Measure prompt-processing performance while keeping generation and load fixed.
+
+category: performance
+framework: llama-benchy
+timeout: 3600
+
+pp: [512, 2048, 4096, 8192]
+tg: [32]
+depth: [0]
+concurrency: [1]
+runs: 3
+warmup_runs: 1
+latency_mode: generation
+prefix_caching: false
